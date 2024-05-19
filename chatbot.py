@@ -4,11 +4,12 @@ from pydantic import BaseModel, Field, validator
 
 
 class Chatbot():
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, device=0):
         self.model = model
         self.tokenizer = tokenizer
         self.chat_history = None
         self.max_input_tokens = 512
+        self.device = device
 
     def chat(self, bot_config, formatter, generation_params=None, debug=False):
         self.chat_history = [('Bot', bot_config.first_message)]
@@ -23,10 +24,11 @@ class Chatbot():
             user_input = input('You: ')
 
     def _truncate_response(self, response):
-        return response.split('\n')[0]
+        response = response.split('\n')[0]
+        return self._truncate_till_close(response)
 
     def _generate_response(self, payload, generation_params):
-        encoded_input = self.tokenizer(payload, return_tensors="pt", padding=True, truncation=True)
+        encoded_input = self.tokenizer(payload, return_tensors="pt", padding=True, truncation=True).to(self.device)
         gen_tokens = self.model.generate(**encoded_input, **generation_params)
         gen_text = self.tokenizer.decode(gen_tokens[0], skip_special_tokens=True)[len(payload):]
         return self._truncate_response(gen_text)
@@ -41,7 +43,7 @@ class Chatbot():
         memory = formatter.memory_template.format(bot_name=bot_name, memory=bot_config.memory)
         prompt = formatter.prompt_template.format(prompt=bot_config.prompt)
         response = formatter.response_template.format(bot_name=bot_name)
-        prompt = self._truncate_prompt(prompt, chat_history, self.max_input_tokens - len(memory))
+        prompt = self._truncate_prompt(prompt, chat_history, self.max_input_tokens - len(memory.split()))
         payload = memory + prompt + chat_history + response
         if debug:
             print('§' * 10)
@@ -50,10 +52,16 @@ class Chatbot():
         return payload
 
     def _truncate_prompt(self, prompt, chat_history, limit):
-        if len(prompt) + len(chat_history) > limit:
-            truncated_length = max(0, limit - len(chat_history))
-            prompt = prompt[:truncated_length]+'\n'
+        if len(prompt.split()) + len(chat_history.split()) > limit:
+            truncated_length = max(0, limit - len(chat_history.split()))
+            prompt = ' '.join(prompt.split()[:truncated_length])+'\n'
         return prompt
+
+    def _truncate_till_close(self, text):
+        last_close = max(text.rfind('.'), text.rfind('?'), text.rfind('!'))
+        if last_close == -1:
+            return text
+        return text[:last_close + 1]
 
     def _format_chat_history(self, bot_config, formatter):
         out = []
@@ -70,7 +78,7 @@ class Chatbot():
         truncated_conversation = []
         total_character_count = 0
         for convo in conversation_list[::-1]:
-            total_character_count += len(convo)
+            total_character_count += len(convo.split())
             if total_character_count <= self.max_input_tokens:
                 truncated_conversation.append(convo)
         return truncated_conversation[::-1]
