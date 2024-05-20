@@ -20,7 +20,7 @@ def get_dpo_data(df):
     rename = {'formatted_conversations': 'prompt',
               'selected_response': 'chosen',
               'rejected_response': 'rejected'}
-    out = out.rename(columns=rename)
+    out = out.rename(columns=rename).to_dict(orien='list')
     return out
 
 
@@ -39,6 +39,6 @@ def format_conversation(df, formatter, context_window_length=600):
 
 
 if __name__ == '__main__':
-    df = load_data('Jellywibble/avb_cleaned')
+    df = load_data('Jellywibble/avb_3k_sample')
     formatter = PromptFormatter()
     dpo_data = get_dpo_data(df)
