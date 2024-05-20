@@ -1,4 +1,5 @@
 import json
+import re
 
 from pydantic import BaseModel, Field, validator
 
@@ -12,20 +13,22 @@ class Chatbot():
         self.device = device
 
     def chat(self, bot_config, formatter, generation_params=None, debug=False):
-        self.chat_history = [('Bot', bot_config.first_message)]
-        self._pprint(bot_config.bot_label, bot_config.first_message, True)
+        bot_name = bot_config.bot_label
+        self.chat_history = [{'message': bot_config.first_message, 'sender': bot_name}]
+        self._pprint(bot_name, bot_config.first_message, True)
+        truncator = ConversationTruncator(formatter, self.max_input_tokens)
         user_input = input('You: ')
         while user_input != 'exit':
-            self.chat_history.append(('User', user_input))
-            payload = self._get_payload(bot_config, formatter, debug)
+            self.chat_history.append({'message': user_input, 'sender': 'You'})
+            payload = truncator.truncate(bot_name, bot_config.memory, bot_config.prompt, self.chat_history)
+            if debug:
+                print('§' * 100)
+                print(payload)
+                print('§' * 100)
             response = self._generate_response(payload, generation_params)
-            self._pprint(bot_config.bot_label, response, True)
-            self.chat_history.append(('Bot', response))
+            self._pprint(bot_name, response, True)
+            self.chat_history.append({'message': response, 'sender': bot_name})
             user_input = input('You: ')
-
-    def _truncate_response(self, response):
-        response = response.split('\n')[0]
-        return self._truncate_till_close(response)
 
     def _generate_response(self, payload, generation_params):
         encoded_input = self.tokenizer(payload, return_tensors="pt", padding=True, truncation=True).to(self.device)
@@ -37,51 +40,15 @@ class Chatbot():
         color = '\033[96m' if is_bot else '\033[93m'
         print(f'{color}{actor_label}: {message}\033[0m')
 
-    def _get_payload(self, bot_config, formatter, debug):
-        chat_history = self._format_chat_history(bot_config, formatter)
-        bot_name = bot_config.bot_label
-        memory = formatter.memory_template.format(bot_name=bot_name, memory=bot_config.memory)
-        prompt = formatter.prompt_template.format(prompt=bot_config.prompt)
-        response = formatter.response_template.format(bot_name=bot_name)
-        prompt = self._truncate_prompt(prompt, chat_history, self.max_input_tokens - len(memory.split()))
-        payload = memory + prompt + chat_history + response
-        if debug:
-            print('§' * 10)
-            print(payload)
-            print('§' * 10)
-        return payload
-
-    def _truncate_prompt(self, prompt, chat_history, limit):
-        if len(prompt.split()) + len(chat_history.split()) > limit:
-            truncated_length = max(0, limit - len(chat_history.split()))
-            prompt = ' '.join(prompt.split()[:truncated_length])+'\n'
-        return prompt
+    def _truncate_response(self, response):
+        response = response.split('\n')[0]
+        return self._truncate_till_close(response)
 
     def _truncate_till_close(self, text):
         last_close = max(text.rfind('.'), text.rfind('?'), text.rfind('!'))
         if last_close == -1:
             return text
         return text[:last_close + 1]
-
-    def _format_chat_history(self, bot_config, formatter):
-        out = []
-        bot_name = bot_config.bot_label
-        for sender, message in self.chat_history:
-            if sender == 'Bot':
-                out.append(formatter.bot_template.format(bot_name=bot_name, message=message))
-            else:
-                out.append(formatter.user_template.format(user_name='You', message=message))
-        out = self._truncate_conversation(out)
-        return ''.join(out)
-
-    def _truncate_conversation(self, conversation_list):
-        truncated_conversation = []
-        total_character_count = 0
-        for convo in conversation_list[::-1]:
-            total_character_count += len(convo.split())
-            if total_character_count <= self.max_input_tokens:
-                truncated_conversation.append(convo)
-        return truncated_conversation[::-1]
 
 
 class BotConfig:
@@ -143,3 +110,66 @@ class PromptFormatter(BaseModel):
         if "{message}" not in user_template:
             raise ValueError("Formatter's user_template must contain '{message}'!")
         return user_template
+
+
+class ConversationTruncator():
+    def __init__(self, formatter, context_window_length=600):
+        self.formatter = formatter
+        self.context_window_length = context_window_length
+
+    def truncate(self, bot_name, memory, prompt, chat_history):
+        memory_formatted = self.formatter.memory_template.format(
+            bot_name=bot_name,
+            memory=memory
+        )
+
+        prompt_formatted = self.formatter.prompt_template.format(
+            prompt=prompt
+        )
+
+        conversation_history = ""
+        for message in chat_history:
+            if message['sender'] == bot_name:
+                conversation_history += self.formatter.bot_template.format(
+                    bot_name=bot_name,
+                    message=message['message']
+                )
+            else:
+                conversation_history += self.formatter.user_template.format(
+                    user_name=message['sender'],
+                    message=message['message']
+                )
+
+        response_prompt = self.formatter.response_template.format(
+            bot_name=bot_name
+        )
+
+        max_n_words = self.context_window_length - len(response_prompt.split())
+        truncated_conversation = self._truncate_conversation(
+            memory_formatted,
+            prompt_formatted,
+            conversation_history,
+            max_n_words=max_n_words
+        )
+        full_formatted_conversation = truncated_conversation + response_prompt
+        return full_formatted_conversation
+
+    def _truncate_conversation(self, memory_formatted, prompt_formatted, conversation_history, max_n_words):
+        max_memory_words = max_n_words // 2
+        words_memory = re.split(r'(?<=\s)', memory_formatted)
+        if len(words_memory) > max_memory_words:
+            words_memory = words_memory[:max_memory_words]
+            memory_formatted = ''.join(words_memory).rstrip()
+
+        remaining_length = max_n_words - len(words_memory)
+        words_prompt = re.split(r'(?<=\s)', prompt_formatted)
+        words_history = re.split(r'(?<=\s)', conversation_history)
+        while len(words_prompt) + len(words_history) > remaining_length and words_prompt:
+            words_prompt.pop()
+        prompt_formatted = ''.join(words_prompt)
+
+        while len(words_history) > remaining_length and words_history:
+            words_history.pop(0)
+
+        conversation_history = ''.join(words_history)
+        return memory_formatted + prompt_formatted + conversation_history
