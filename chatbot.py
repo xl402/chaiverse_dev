@@ -33,7 +33,7 @@ class Chatbot():
     def _generate_response(self, payload, generation_params):
         encoded_input = self.tokenizer(payload, return_tensors="pt", padding=True, truncation=True).to(self.device)
         gen_tokens = self.model.generate(**encoded_input, **generation_params)
-        gen_text = self.tokenizer.decode(gen_tokens[0], skip_special_tokens=True)[len(payload):]
+        gen_text = self.tokenizer.decode(gen_tokens[0])[len(payload):]
         return self._truncate_response(gen_text)
 
     def _pprint(self, actor_label, message, is_bot):
